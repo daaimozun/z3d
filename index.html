@@ -2693,6 +2693,7 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
       if (p[0] === 'polar') return { kind: 'polar', pol: p[1], pa: p[2], pb: p[3], pm: p[4] };
       if (p[0] === 'pv') return { kind: 'pv', xu: p[1], yu: p[2], zu: p[3], ua: p[4], ub: p[5], va: p[6], vb: p[7], pn: p[8] };
       if (p[0] === 'implicit') return { kind: 'implicit', eq: p[1], ir: p[2], in: p[3] };
+      if (p[0] === 'ode') return { kind: 'ode', dx: p[1], dy: p[2], dz: p[3], x0: p[4], y0: p[5], z0: p[6], a: p[7], b: p[8], om: p[9] };
       return null;
     }
 
@@ -3086,6 +3087,7 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
       case 'pv': return '参数曲面';
       case 'implicit': return '方程 ' + p[1];
       case 'point': return '点 (' + p[1] + ', ' + p[2] + ', ' + p[3] + ')';
+      case 'ode': return '轨迹 x′=' + p[1] + ', y′=' + p[2] + ', z′=' + p[3];
       default: return p[0];
     }
   }
@@ -3137,6 +3139,16 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
       ps.n = Math.max(6, Math.min(120, Math.round(+parts[8] || 30)));
       runParamSurface(compile(ps.x, ['u', 'v']), compile(ps.y, ['u', 'v']), compile(ps.z, ['u', 'v']));
       ps = saved;
+    } else if (type === 'ode') {
+      saved = [ta, tb, ode.x0, ode.y0, ode.z0, ode.n];
+      ta = +parts[7] || 0; tb = +parts[8] || 20;
+      ode.x0 = +parts[4] || 0; ode.y0 = +parts[5] || 0; ode.z0 = +parts[6] || 0;
+      ode.n = Math.max(10, Math.min(20000, Math.round(+parts[9] || 3000)));
+      runOde(compile(parts[1] || '0', ['t', 'x', 'y', 'z']),
+             compile(parts[2] || '0', ['t', 'x', 'y', 'z']),
+             compile(parts[3] || '0', ['t', 'x', 'y', 'z']));
+      ta = saved[0]; tb = saved[1];
+      ode.x0 = saved[2]; ode.y0 = saved[3]; ode.z0 = saved[4]; ode.n = saved[5];
     } else if (type === 'implicit') {
       saved = [ir, inn];
       ir = +parts[2] > 0 ? +parts[2] : 1.5;
@@ -3189,6 +3201,7 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
     if (kind === 'polar') return specOf('polar', [polE, num('pa', 0), num('pb', 6.2832), Math.round(num('pm', 600, 8, 8000))]);
     if (kind === 'pv') return specOf('pv', [ps.x, ps.y, ps.z, ps.ua, ps.ub, ps.va, ps.vb, ps.n]);
     if (kind === 'implicit') return specOf('implicit', [eq, ir, inn]);
+    if (kind === 'ode') return specOf('ode', [ode.x, ode.y, ode.z, ode.x0, ode.y0, ode.z0, ta, tb, ode.n]);
     return null;
   }
 

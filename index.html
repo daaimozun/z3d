@@ -17,7 +17,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Z3d 本地演示</title>
+<title>Z3d 三维函数绘图</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #fff; }
   #viz { position: absolute; inset: 0; }
@@ -181,7 +181,7 @@
 <div id="viz"></div>
 <div id="panel">
   <div id="panelHead">
-    <h1>Z3d 本地演示</h1>
+    <h1>Z3d 三维函数绘图</h1>
     <span id="editBadge"></span>
     <button id="panelToggle" type="button" title="收起 / 展开面板">−</button>
   </div>
@@ -2086,7 +2086,8 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
   };
 
   // ---- 填表单 ----
-  $('fx').value = expr; $('fr').value = range; $('gn').value = grid;
+  $('fx').value = expr || (kind === 'demo' ? '1.1*sin(x)*cos(y)' : '');
+  $('fr').value = range; $('gn').value = grid;
   $('cx').value = cu.x; $('cy').value = cu.y; $('cz').value = cu.z;
   $('ta').value = ta; $('tb').value = tb; $('tn').value = tm;
   $('xu').value = ps.x; $('yu').value = ps.y; $('zu').value = ps.z;
@@ -2122,7 +2123,7 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
   };
 
   $('tabs').innerHTML = '看什么：' + [
-    ['demo', '示例点', '?mode=styled'],
+    ['demo', '示例点', '?mode=styled&sample=1'],
     ['surface', '曲面 z=f(x,y)', linkSurface('sin(x)*cos(y)')],
     ['curve', '参数曲线', linkCurve('t', 't*t', 't*t*t')],
     ['pv', '参数曲面', linkPv('cos(u)*sin(v)', 'sin(u)*sin(v)', 'cos(v)', 0, 3.1416, 0, 6.2832)],
@@ -2538,7 +2539,10 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
     var box = bbox(pts);
     // 默认视角：从斜上方看（相对数学 xy 平面抬高约 40°）
     var dir = toSceneDir(useBest ? bestViewDir(pts) : new THREE.Vector3(0.58, 0.58, 0.72).normalize());
-    var d = box.radius * 3.0;
+    // 竖屏 / 窄窗口时横向视野很小，按宽高比把相机拉远一些，免得图被裁掉
+    var aspect = (stage.camera && stage.camera.aspect) || 1;
+    var zoomOut = aspect < 1.35 ? Math.min(2.8, 1.35 / aspect) : 1;
+    var d = box.radius * 3.0 * zoomOut;
     var center = new THREE.Vector3(box.center.x, box.center.z, -box.center.y);
     // 近远平面跟着数据走：t 一大（t³ 到几千），固定的 far=8000 会把整条曲线裁没
     stage.camera.near = Math.max(d / 5000, 1e-6);
@@ -2574,19 +2578,47 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
   //   pv|xu|yu|zu|ua|ub|va|vb|n                 implicit|eq|r|n
   //   point|x|y|z|半径|颜色|名字
   var WS_KEY = 'z3d-workspaces-v1';
+  // 第一次打开（或「示例点」）时放好的三样东西，免得看到一片空白
+  var SAMPLE_ITEMS = [
+    'surface|1.1*sin(x)*cos(y)|3|34',
+    'curve|2*cos(t)|2*sin(t)|t/3|-6|6|700',
+    'point|2|0|0|0.07|e4572e|P'
+  ];
+  function emptyWs(name) {
+    return { name: name || '工作区 1', items: [], widths: [], colors: [], eqs: [] };
+  }
+  var SEEDED_NOW = false;
   var WS = (function () {
+    var q0 = new URLSearchParams(location.search);
+    var wantSample = q0.get('sample') === '1';
     try {
       var raw = localStorage.getItem(WS_KEY);
       if (raw) {
         var o = JSON.parse(raw);
-        if (o && o.list && o.list.length) return o;
+        if (o && o.list && o.list.length) {
+          if (wantSample) {
+            // 点「示例点」：单独开一个示例工作区，别动用户原来的
+            o.list.push({ name: '示例', items: SAMPLE_ITEMS.slice(), widths: [], colors: [], eqs: [] });
+            o.active = o.list.length - 1;
+            SEEDED_NOW = true;
+          }
+          return o;
+        }
       }
     } catch (e) { /* localStorage 不可用就退化成内存 */ }
-    return { list: [{ name: '工作区 1', items: [] }], active: 0 };
+    var fresh = emptyWs('工作区 1');
+    // 首次进入才放示例；带参数的分享链接保持干净
+    if (wantSample || (!q0.get('kind') && !q0.get('add') && q0.get('mode') !== 'blank')) {
+      fresh.items = SAMPLE_ITEMS.slice();
+      fresh.name = '示例';
+      SEEDED_NOW = true;
+    }
+    return { list: [fresh], active: 0 };
   })();
   function saveWS() {
     try { localStorage.setItem(WS_KEY, JSON.stringify(WS)); } catch (e) { }
   }
+  if (SEEDED_NOW) saveWS();
   function wsItems() { return WS.list[WS.active].items; }
   // 每层的线宽（和工作区的 items 一一对应）
   function wsWidths() {

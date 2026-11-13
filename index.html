@@ -123,6 +123,17 @@
     border-radius: 6px; font: 600 15px/1 -apple-system, "Segoe UI", sans-serif;
   }
   #newItem:hover { background: #eaf4ff; border-color: #7fb0d8; }
+  #toolRow { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 4px; }
+  #toolRow button {
+    flex: 1 1 auto; border: 1px solid #cddbe8; background: #f7fbff; color: #2b6cb0;
+    border-radius: 5px; padding: 3px 6px; font: 11px/1.5 inherit; cursor: pointer; white-space: nowrap;
+  }
+  #toolRow button:hover { background: #eaf4ff; }
+  #measOut { font: 11px/1.7 Consolas, monospace; color: #333; white-space: pre-wrap; margin-bottom: 6px; }
+  #measOut .k { color: #888; }
+  #measOut .v { color: #1a5c2a; font-weight: 600; }
+  #measOut .e { color: #999; }
+  #measOut .w { color: #c0392b; }
   #lwBtn {
     border: 1px solid #b9cfe3; background: #f7fbff; color: #2b6cb0; cursor: pointer;
     border-radius: 5px; padding: 3px 10px; font: 12px/1.4 inherit;
@@ -319,6 +330,13 @@
   <div id="wsList"></div>
   <h2 class="sub">这个工作区的图形</h2>
   <div id="itemList"></div>
+  <div id="toolRow">
+    <button id="measBtn" type="button" title="量这一层的长度 / 面积 / 体积">测量</button>
+    <button id="savePng" type="button" title="把当前画面存成图片">存图</button>
+    <button id="saveJson" type="button" title="把全部工作区导出成 JSON">存数据</button>
+    <button id="saveLink" type="button" title="复制当前这张图的链接">复制链接</button>
+  </div>
+  <div id="measOut"></div>
   <button id="newItem" type="button" title="在这个工作区里加一个新图形">＋</button>
   <div id="wsSet">
     <div class="hd">工作区设置 <button id="wsSetClose" type="button">✕</button></div>
@@ -3069,6 +3087,62 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
       applyPanelScale();
       syncPanelUrl();
     });
+    // ---- 测量 ----
+    function measTargetIdx() {
+      var ed = parseInt(params.get('ed'), 10);
+      var items = wsItems();
+      if (isFinite(ed) && ed >= 0 && ed < items.length) return ed;
+      return items.length ? items.length - 1 : -1;
+    }
+    function renderMeasure(idx) {
+      var box = $('measOut');
+      if (!box) return;
+      if (idx < 0) { box.innerHTML = '<span class="w">工作区里还没有图形</span>'; return; }
+      var spec = wsItems()[idx];
+      var res;
+      try { res = measureSpec(spec); } catch (e) { box.innerHTML = '<span class="w">量不了：' + esc(e.message || e) + '</span>'; return; }
+      if (!res || !res.items.length) { box.innerHTML = '<span class="w">这一层没有可量的量</span>'; return; }
+      var lines = ['<span class="k">' + esc(specName(spec)) + '</span>'];
+      res.items.forEach(function (it) {
+        var v = fmtNum(it.r.value, it.r.error);
+        lines.push('<span class="k">' + it.name + '</span> <span class="v">≈ ' + v +
+          '</span> <span class="e">' + fmtErr(it.r.error) + (it.note ? ' · ' + it.note : '') + '</span>');
+      });
+      box.innerHTML = lines.join('<br>');
+    }
+    $('measBtn').addEventListener('click', function () {
+      $('measOut').innerHTML = '<span class="k">计算中…</span>';
+      setTimeout(function () { renderMeasure(measTargetIdx()); }, 30);
+    });
+
+    // ---- 保存 / 导出 ----
+    function download(name, text, mime) {
+      var blob = new Blob([text], { type: mime || 'application/octet-stream' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    }
+    $('savePng').addEventListener('click', function () {
+      if (!sharedStage || !sharedStage.renderer) return;
+      sharedStage.renderer.render(sharedStage.scene, sharedStage.camera);
+      var url = sharedStage.renderer.domElement.toDataURL('image/png');
+      var a = document.createElement('a');
+      a.href = url; a.download = 'z3d-' + Date.now() + '.png';
+      document.body.appendChild(a); a.click(); a.remove();
+    });
+    $('saveJson').addEventListener('click', function () {
+      download('z3d-workspaces-' + Date.now() + '.json', JSON.stringify(WS, null, 2), 'application/json');
+    });
+    $('saveLink').addEventListener('click', function () {
+      var url = location.href;
+      var done = function () { $('measOut').innerHTML = '<span class="k">链接已复制：</span>' + esc(url.slice(0, 60)) + '…'; };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, function () { window.prompt('复制这个链接', url); });
+      } else { window.prompt('复制这个链接', url); }
+    });
+
     $('lwList').addEventListener('input', function (ev) {
       var c = ev.target.closest('[data-col]');
       if (!c) return;
@@ -3485,6 +3559,287 @@ if (_typeface_js && _typeface_js.loadFace) _typeface_js.loadFace({"glyphs":{"ο"
     frame(stage, verts, true);
     setLegend(box.min, box.max, extra);
     return stage;
+  }
+
+
+  // ================= 测量：长度 / 面积 / 体积 =================
+  // 思路：
+  //  · 曲线长度     → 一维复合 Gauss 积分 |r'(t)|
+  //  · 曲面体积/面积 → 二维复合 Gauss 积分（矩形域），自适应加密到收敛
+  //  · 参数曲面     → 二维积分 |r_u × r_v|（面积）与 (1/3) r·(r_u × r_v)（闭合体积）
+  //  · 隐式曲面     → 四面体网格上的三角面求和（体积用有向四面体，面积直接累加）
+  // 每个结果都附一个误差估计：拿两档密度的结果相减。
+  var GL_X = [-0.9061798459386640, -0.5384693101056831, 0, 0.5384693101056831, 0.9061798459386640];
+  var GL_W = [0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891];
+
+  function gauss1(f, a, b, n) {
+    if (!(b > a) || !isFinite(a) || !isFinite(b)) return NaN;
+    var h = (b - a) / n, sum = 0;
+    for (var i = 0; i < n; i++) {
+      var c = a + i * h, m = c + h / 2, r = h / 2;
+      for (var g = 0; g < 5; g++) {
+        var v = f(m + r * GL_X[g]);
+        if (isFinite(v)) sum += GL_W[g] * r * v;
+      }
+    }
+    return sum;
+  }
+  function gauss2(f, ax, bx, ay, by, n) {
+    if (!(bx > ax) || !(by > ay)) return NaN;
+    var hx = (bx - ax) / n, hy = (by - ay) / n, sum = 0;
+    for (var i = 0; i < n; i++) {
+      var cx = ax + i * hx, mx = cx + hx / 2, rx = hx / 2;
+      for (var j = 0; j < n; j++) {
+        var cy = ay + j * hy, my = cy + hy / 2, ry = hy / 2;
+        for (var g = 0; g < 5; g++) {
+          for (var k = 0; k < 5; k++) {
+            var v = f(mx + rx * GL_X[g], my + ry * GL_X[k]);
+            if (isFinite(v)) sum += GL_W[g] * GL_W[k] * rx * ry * v;
+          }
+        }
+      }
+    }
+    return sum;
+  }
+  // 两档密度 + Richardson 外推：I ≈ (2^p·I2 - I1)/(2^p - 1)，误差取 |I2 - I1|
+  function refine2(f, ax, bx, ay, by, p) {
+    var a1 = gauss2(f, ax, bx, ay, by, 8);
+    var b1 = gauss2(f, ax, bx, ay, by, 16);
+    var c1 = gauss2(f, ax, bx, ay, by, 32);
+    if (!isFinite(c1)) return null;
+    var err = Math.abs(c1 - b1) + Math.abs(b1 - a1) * 1e-3;
+    var k = Math.pow(2, p);
+    var val = isFinite(b1) ? (k * c1 - b1) / (k - 1) : c1;
+    return { value: val, error: err * 1.2 + 1e-12 };
+  }
+  function refine1(f, a, b, p) {
+    var a1 = gauss1(f, a, b, 200);
+    var b1 = gauss1(f, a, b, 800);
+    var c1 = gauss1(f, a, b, 3200);
+    if (!isFinite(c1)) return null;
+    var err = Math.abs(c1 - b1) + Math.abs(b1 - a1) * 1e-3;
+    var k = Math.pow(2, p);
+    var val = isFinite(b1) ? (k * c1 - b1) / (k - 1) : c1;
+    return { value: val, error: err * 1.2 + 1e-12 };
+  }
+  function dnum(f, a, b, t) {
+    var h = (b - a) * 1e-6;
+    return (f(t + h) - f(t - h)) / (2 * h);
+  }
+  function partial(g, a, b, u, v, dir) {
+    var h = (b - a) * 1e-6;
+    if (dir === 0) return (g(u + h, v) - g(u - h, v)) / (2 * h);
+    return (g(u, v + h) - g(u, v - h)) / (2 * h);
+  }
+
+
+  // 自适应二维积分：每个格子先算一次，再和四等分后的和比；差太多就继续细分。
+  // 这样对"边界上导数为无穷"的函数（比如 z=√(1-x²-y²) 的边缘）也能收敛，
+  // 而不是像固定网格那样把误差摊到整个区域。
+  function adaptive2(f, ax, bx, ay, by, tol, maxDepth) {
+    var total = 0, errSum = 0, depthLimit = maxDepth || 14;
+    tol = tol || 1e-7;
+    function cell(x0, x1, y0, y1, depth) {
+      var mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      var I = gauss2(f, x0, x1, y0, y1, 1);
+      var S = gauss2(f, x0, mx, y0, my, 1) + gauss2(f, mx, x1, y0, my, 1) +
+              gauss2(f, x0, mx, my, y1, 1) + gauss2(f, mx, x1, my, y1, 1);
+      if (!isFinite(I)) return;
+      if (!isFinite(S)) { total += I; return; }
+      var diff = Math.abs(S - I);
+      var scale = Math.abs(S) + Math.abs(I) + 1e-30;
+      if (depth >= depthLimit || diff <= tol * scale) {
+        // Richardson：两个 5 点 Gauss 的结果合起来，误差按 1/(2^10-1) 估
+        total += S + (S - I) / 1023;
+        errSum += diff / 1023 + Math.abs(S - I) * 1e-9;
+        return;
+      }
+      cell(x0, mx, y0, my, depth + 1);
+      cell(mx, x1, y0, my, depth + 1);
+      cell(x0, mx, my, y1, depth + 1);
+      cell(mx, x1, my, y1, depth + 1);
+    }
+    cell(ax, bx, ay, by, 0);
+    if (!isFinite(total)) return null;
+    return { value: total, error: Math.abs(errSum) + Math.abs(total) * 1e-12 + 1e-12 };
+  }
+
+  // 数值 -> 好看的字串
+  function fmtNum(v, err) {
+    if (!isFinite(v)) return '—';
+    if (!isFinite(err) || err <= 0) return v.toPrecision(8);
+    var digits = Math.max(0, Math.min(10, Math.ceil(-Math.log(err) / Math.LN10) + 1));
+    return v.toFixed(Math.min(digits, 12));
+  }
+  function fmtErr(e) {
+    if (!isFinite(e) || e <= 0) return '±0';
+    return '± ' + e.toExponential(1);
+  }
+
+  // 单个图层的测量
+  function measureSpec(spec) {
+    var p = String(spec).split('|');
+    var out = { type: p[0], items: [] };
+    if (p[0] === 'curve') {
+      var x = compile(p[1], ['t']), y = compile(p[2], ['t']), z = compile(p[3], ['t']);
+      var a = +p[4], b = +p[5];
+      var speed = function (t) {
+        var dx = dnum(x, a, b, t), dy = dnum(y, a, b, t), dz = dnum(z, a, b, t);
+        var v = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        return isFinite(v) ? v : 0;
+      };
+      var L = refine1(speed, a, b, 2);
+      if (L) out.items.push({ name: '弧长', r: L, exact: false });
+      return out;
+    }
+    if (p[0] === 'polar') {
+      var r = compile(p[1], ['t']), a2 = +p[2], b2 = +p[3];
+      var sp = function (t) {
+        var rr = r(t), dr = dnum(r, a2, b2, t);
+        var v = Math.sqrt(rr * rr + dr * dr);
+        return isFinite(v) ? v : 0;
+      };
+      var L2 = refine1(sp, a2, b2, 2);
+      if (L2) out.items.push({ name: '弧长', r: L2, exact: false });
+      return out;
+    }
+    if (p[0] === 'surface') {
+      var f = compile(p[1], ['x', 'y']), R = +p[2];
+      var vol = adaptive2(function (u, v) { return f(u, v); }, -R, R, -R, R, 1e-9, 16);
+      var area = adaptive2(function (u, v) {
+        var fx = (f(u + R * 1e-6, v) - f(u - R * 1e-6, v)) / (2 * R * 1e-6);
+        var fy = (f(u, v + R * 1e-6) - f(u, v - R * 1e-6)) / (2 * R * 1e-6);
+        var g = Math.sqrt(1 + fx * fx + fy * fy);
+        return isFinite(g) ? g : NaN;
+      }, -R, R, -R, R, 1e-7, 16);
+      // 面积里用了数值导数，误差下限给 1e-6 相对值，别报一个假的很小的误差
+      if (area) area.error = Math.max(area.error, Math.abs(area.value) * 1e-5 + 1e-9);
+      if (vol) out.items.push({ name: '曲面下体积', r: vol, note: '∬f dxdy' });
+      if (area) out.items.push({ name: '曲面面积', r: area, note: '∬√(1+fₓ²+f_y²)' });
+      return out;
+    }
+    if (p[0] === 'pv') {
+      var xu = compile(p[1], ['u', 'v']), yu = compile(p[2], ['u', 'v']), zu = compile(p[3], ['u', 'v']);
+      var ua = +p[4], ub = +p[5], va = +p[6], vb = +p[7];
+      var area2 = adaptive2(function (u, v) {
+        var x1 = partial(xu, ua, ub, u, v, 0), y1 = partial(yu, ua, ub, u, v, 0), z1 = partial(zu, ua, ub, u, v, 0);
+        var x2 = partial(xu, va, vb, u, v, 1), y2 = partial(yu, va, vb, u, v, 1), z2 = partial(zu, va, vb, u, v, 1);
+        var cx = y1 * z2 - z1 * y2, cy = z1 * x2 - x1 * z2, cz = x1 * y2 - y1 * x2;
+        var g = Math.sqrt(cx * cx + cy * cy + cz * cz);
+        return isFinite(g) ? g : NaN;
+      }, ua, ub, va, vb, 1e-8, 14);
+      if (area2) {
+        area2.error = Math.max(area2.error, Math.abs(area2.value) * 1e-5 + 1e-9);
+        out.items.push({ name: '曲面面积', r: area2, note: '∬|r_u×r_v|' });
+      }
+      var vol2 = adaptive2(function (u, v) {
+        var P = [xu(u, v), yu(u, v), zu(u, v)];
+        var x1 = partial(xu, ua, ub, u, v, 0), y1 = partial(yu, ua, ub, u, v, 0), z1 = partial(zu, ua, ub, u, v, 0);
+        var x2 = partial(xu, va, vb, u, v, 1), y2 = partial(yu, va, vb, u, v, 1), z2 = partial(zu, va, vb, u, v, 1);
+        var cx = y1 * z2 - z1 * y2, cy = z1 * x2 - x1 * z2, cz = x1 * y2 - y1 * x2;
+        return (P[0] * cx + P[1] * cy + P[2] * cz) / 3;
+      }, ua, ub, va, vb, 1e-8, 14);
+      if (vol2 && isFinite(vol2.value)) {
+        var vol2err = Math.max(vol2.error, Math.abs(vol2.value) * 1e-5 + 1e-9);
+        out.items.push({ name: '围成体积', r: { value: Math.abs(vol2.value), error: vol2err }, note: '闭合曲面才成立' });
+      }
+      return out;
+    }
+    if (p[0] === 'implicit') {
+      var F = compile(fixConsts(toZeroForm(p[1] || '')), ['x', 'y', 'z']);
+      var R2 = +p[2] > 0 ? +p[2] : 1.5;
+      var nBase = Math.max(18, Math.min(60, Math.round(+p[3] || 26)));
+      var n2 = Math.min(72, nBase * 2);
+      var m1 = meshVolume(F, R2, nBase);
+      var m2 = meshVolume(F, R2, n2);
+      if (m1 && m2) {
+        // 二阶收敛 → Richardson：(4·V2 − V1)/3
+        var eV = Math.abs(m2.volume - m1.volume);
+        var eA = Math.abs(m2.area - m1.area);
+        var vR = (4 * m2.volume - m1.volume) / 3;
+        var aR = (4 * m2.area - m1.area) / 3;
+        // 两档差别很大说明还没收敛，这时误差条就按差多少报多少
+        out.items.push({ name: '曲面面积', r: { value: aR, error: eA * 1.5 + 1e-9 }, note: '网格 ' + nBase + '/' + n2 });
+        out.items.push({ name: '围成体积', r: { value: vR, error: eV * 1.5 + 1e-9 }, note: '网格 ' + nBase + '/' + n2 });
+      }
+      return out;
+    }
+    return out;
+  }
+
+  // 隐式曲面：走一遍四面体网格，顺便算面积与有向体积
+  function meshVolume(F, R, n) {
+    var step = 2 * R / n, h = n + 1;
+    var val = new Float64Array(h * h * h);
+    var idx = function (i, j, k) { return (i * h + j) * h + k; };
+    for (var i = 0; i < h; i++) {
+      for (var j = 0; j < h; j++) {
+        for (var k = 0; k < h; k++) {
+          var v;
+          try { v = F(-R + i * step, -R + j * step, -R + k * step); } catch (e) { v = NaN; }
+          val[idx(i, j, k)] = isFinite(v) ? v : NaN;
+        }
+      }
+    }
+    var area = 0, vol = 0, cornerPos = [], cornerVal = [];
+    for (var ci = 0; ci < n; ci++) {
+      for (var cj = 0; cj < n; cj++) {
+        for (var ck = 0; ck < n; ck++) {
+          var ok = true;
+          for (var q = 0; q < 8; q++) {
+            var ox = CUBE[q][0], oy = CUBE[q][1], oz = CUBE[q][2];
+            var v2 = val[idx(ci + ox, cj + oy, ck + oz)];
+            if (!isFinite(v2)) { ok = false; break; }
+            cornerPos[q] = [-R + (ci + ox) * step, -R + (cj + oy) * step, -R + (ck + oz) * step];
+            cornerVal[q] = v2;
+          }
+          if (!ok) continue;
+          for (var ti = 0; ti < TETS.length; ti++) {
+            var tet = TETS[ti], cross = [], gx = 0, gy = 0, gz = 0;
+            for (var e1 = 0; e1 < 4; e1++) {
+              for (var e2 = e1 + 1; e2 < 4; e2++) {
+                var a1 = tet[e1], a2 = tet[e2];
+                var vA = cornerVal[a1], vB = cornerVal[a2];
+                if ((vA < 0) === (vB < 0)) continue;
+                var tt = vA / (vA - vB);
+                var pa = cornerPos[a1], pb = cornerPos[a2];
+                cross.push([pa[0] + (pb[0] - pa[0]) * tt, pa[1] + (pb[1] - pa[1]) * tt, pa[2] + (pb[2] - pa[2]) * tt]);
+              }
+            }
+            if (cross.length < 3) continue;
+            // 梯度方向（近似）：用四个角的值做差分，决定法向朝哪边
+            gx = (cornerVal[tet[1]] - cornerVal[tet[0]]) + (cornerVal[tet[2]] - cornerVal[tet[3]]);
+            gy = (cornerVal[tet[2]] - cornerVal[tet[0]]) + (cornerVal[tet[3]] - cornerVal[tet[1]]);
+            gz = (cornerVal[tet[3]] - cornerVal[tet[0]]) + (cornerVal[tet[2]] - cornerVal[tet[1]]);
+            var ring = orderRing(cross);
+            for (var t3 = 1; t3 + 1 < ring.length; t3++) {
+              var A = ring[0], B = ring[t3], C = ring[t3 + 1];
+              var abx = B[0] - A[0], aby = B[1] - A[1], abz = B[2] - A[2];
+              var acx = C[0] - A[0], acy = C[1] - A[1], acz = C[2] - A[2];
+              var nx = aby * acz - abz * acy, ny = abz * acx - abx * acz, nz = abx * acy - aby * acx;
+              var len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+              if (!(len > 0)) continue;
+              area += len / 2;
+              // 朝向：用 F 在三角形重心的数值梯度当外法向（F<0 内部 → 梯度指向外）
+              var cx3 = (A[0] + B[0] + C[0]) / 3, cy3 = (A[1] + B[1] + C[1]) / 3, cz3 = (A[2] + B[2] + C[2]) / 3;
+              var eh = step * 0.5;
+              var gx3, gy3, gz3;
+              try {
+                gx3 = F(cx3 + eh, cy3, cz3) - F(cx3 - eh, cy3, cz3);
+                gy3 = F(cx3, cy3 + eh, cz3) - F(cx3, cy3 - eh, cz3);
+                gz3 = F(cx3, cy3, cz3 + eh) - F(cx3, cy3, cz3 - eh);
+              } catch (e) { gx3 = gy3 = gz3 = 0; }
+              var dot = nx * gx3 + ny * gy3 + nz * gz3;
+              var sgn = dot < 0 ? -1 : 1;
+              vol += sgn * (A[0] * (B[1] * C[2] - B[2] * C[1]) +
+                A[1] * (B[2] * C[0] - B[0] * C[2]) +
+                A[2] * (B[0] * C[1] - B[1] * C[0])) / 6;
+            }
+          }
+        }
+      }
+    }
+    return { area: area, volume: Math.abs(vol) };
   }
 
   // ================= x(t), y(t), z(t) =================
